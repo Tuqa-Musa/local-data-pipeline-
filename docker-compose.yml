@@ -1,0 +1,90 @@
+version: "3.8"
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.10.3
+  environment:
+    # --- Core Airflow config ---
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+    # --- Pre-registered connection to our analytics warehouse ---
+    # Format: postgres://user:password@host:port/dbname
+    AIRFLOW_CONN_ANALYTICS_DB_CONN: postgresql://airflow:airflow@postgres-dw:5432/analytics_db
+    _PIP_ADDITIONAL_REQUIREMENTS: "pandas"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./raw_transactions.csv:/opt/airflow/dags/raw_transactions.csv
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+    postgres-dw:
+      condition: service_healthy
+
+services:
+  # --- Postgres #1: Airflow's own internal metadata DB (task states, DAG runs, etc.) ---
+  postgres-airflow:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-airflow-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  # --- Postgres #2: our actual "data warehouse" (this is what the DAG writes to) ---
+  postgres-dw:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: analytics_db
+    ports:
+      - "5433:5432"  # exposed on host port 5433 so you can connect from DBeaver/psql if you like
+    volumes:
+      - postgres-dw-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username airflow \
+          --password airflow \
+          --firstname Data \
+          --lastname Engineer \
+          --role Admin \
+          --email admin@example.com
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-airflow-data:
+  postgres-dw-data:

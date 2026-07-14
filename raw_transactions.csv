@@ -1,0 +1,6 @@
+transaction_id,txn_date,amount,currency,status,merchant
+TXN-1001,12-05-2026,$45.50,USD,SUCCESS,Amazon
+TXN-1002,2026/05/13,12.00,,failed,STARBUCKS
+TXN-1003,05-14-26,-8.99,EUR,Success,Netflix
+TXN-1004,,105.25,USD,PENDING,Apple
+TXN-1005,16-05-2026,0.00,,SUCCESS,Test_Transaction
