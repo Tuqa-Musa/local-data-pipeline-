@@ -1,56 +1,43 @@
-version: "3.8"
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.10.3
+  image: apache/airflow:3.1.8
   environment:
-    # --- Core Airflow config ---
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: ""
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # --- New in Airflow 3: tasks talk to Postgres through this internal API instead of directly ---
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-apiserver:8080/execution/"
+    # --- New in Airflow 3: required secret used to sign internal auth tokens ---
+    # (any fixed string works fine for local/learning use; keep it consistent across all services)
+    AIRFLOW__API_AUTH__JWT_SECRET: "local-learning-project-secret-key"
+    # --- Keep the classic username/password login (same as your Airflow 2 setup) ---
+    # instead of Airflow 3's new default "Simple Auth Manager"
+    AIRFLOW__CORE__AUTH_MANAGER: "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager"
     AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
-    # --- Pre-registered connection to our analytics warehouse ---
-    # Format: postgres://user:password@host:port/dbname
-    AIRFLOW_CONN_ANALYTICS_DB_CONN: postgresql://airflow:airflow@postgres-dw:5432/analytics_db
-    _PIP_ADDITIONAL_REQUIREMENTS: "pandas"
+    # Same connection your DAG's PostgresHook looks up
+    AIRFLOW_CONN_ANALYTICS_DB_CONN: postgresql://airflow:airflow@postgres:5432/airflow
+    # apache-airflow-providers-fab is required now since FAB is no longer bundled by default
+    _PIP_ADDITIONAL_REQUIREMENTS: "pandas apache-airflow-providers-fab"
   volumes:
     - ./dags:/opt/airflow/dags
     - ./raw_transactions.csv:/opt/airflow/dags/raw_transactions.csv
   depends_on:
-    postgres-airflow:
-      condition: service_healthy
-    postgres-dw:
+    postgres:
       condition: service_healthy
 
 services:
-  # --- Postgres #1: Airflow's own internal metadata DB (task states, DAG runs, etc.) ---
-  postgres-airflow:
+  postgres:
     image: postgres:15
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes:
-      - postgres-airflow-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 5s
-      retries: 5
-
-  # --- Postgres #2: our actual "data warehouse" (this is what the DAG writes to) ---
-  postgres-dw:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: analytics_db
-    ports:
-      - "5433:5432"  # exposed on host port 5433 so you can connect from DBeaver/psql if you like
-    volumes:
-      - postgres-dw-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
       interval: 5s
       retries: 5
 
@@ -69,12 +56,21 @@ services:
           --role Admin \
           --email admin@example.com
 
-  airflow-webserver:
+  # --- Renamed from "airflow-webserver" in Airflow 2 ---
+  airflow-apiserver:
     <<: *airflow-common
-    command: webserver
+    command: api-server
     ports:
       - "8080:8080"
+    restart: on-failure
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
     depends_on:
+      postgres:
+        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
 
@@ -82,9 +78,20 @@ services:
     <<: *airflow-common
     command: scheduler
     depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  # --- New required service in Airflow 3: DAG parsing moved out of the scheduler ---
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      postgres:
+        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
 
 volumes:
-  postgres-airflow-data:
-  postgres-dw-data:
+  postgres-data:
